@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/charmbracelet/bubbles/key"
 	"github.com/charmbracelet/bubbles/viewport"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
@@ -26,7 +27,6 @@ const (
 )
 
 const (
-	maxWrap   = 100
 	fastLines = 10 // Shift+arrow / J K
 	wheelStep = 3  // lines per wheel notch
 	fastWheel = 15 // Alt+wheel
@@ -42,8 +42,10 @@ type (
 type model struct {
 	path, name string // path is "" for stdin
 	src        []byte
-	style      string
+	pal        palette
 	th         uiTheme
+	keys       keyMap
+	maxWidth   int
 
 	w, h  int
 	pad   int
@@ -78,21 +80,40 @@ type model struct {
 	errText   string
 }
 
-func newModel(path, name string, src []byte, style string, spaced bool) model {
-	return model{path: path, name: name, src: src, style: style, sel: -1, th: newUITheme(style), spaced: spaced}
+// viewOpts are the viewer settings that come from flags and the config.
+type viewOpts struct {
+	pal      palette
+	keys     keyMap
+	spaced   bool
+	maxWidth int
+	flash    string // shown in the status bar at startup, e.g. config warnings
 }
 
-func (m model) Init() tea.Cmd { return nil }
+func newModel(path, name string, src []byte, o viewOpts) model {
+	return model{
+		path: path, name: name, src: src, sel: -1,
+		pal: o.pal, th: newUITheme(o.pal), keys: o.keys, maxWidth: o.maxWidth,
+		spaced: o.spaced, flash: o.flash,
+	}
+}
+
+func (m model) Init() tea.Cmd {
+	if m.flash == "" {
+		return nil
+	}
+	gen := m.flashGen
+	return tea.Tick(5*time.Second, func(time.Time) tea.Msg { return clearFlashMsg{gen} })
+}
 
 // ---- rendering and layout ----
 
 func (m *model) rerender() {
-	wrap := min(m.w-4, maxWrap)
+	wrap := min(m.w-4, m.maxWidth)
 	if wrap < 20 {
 		wrap = max(m.w, 10)
 	}
 	m.pad = max((m.w-wrap)/2, 0)
-	d, err := buildDoc(m.src, wrap, m.pad, m.style, false)
+	d, err := buildDoc(m.src, wrap, m.pad, m.pal, false)
 	if err != nil {
 		m.errText = err.Error()
 		d = &Doc{}
@@ -255,6 +276,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.w, m.h = msg.Width, msg.Height
 		if !m.ready {
 			m.vp = viewport.New(m.w, m.h-1)
+			m.vp.KeyMap = viewport.KeyMap{} // keys are handled in updateNormal
 			m.ready = true
 			m.rerender()
 			var cmd tea.Cmd
@@ -379,38 +401,36 @@ func (m *model) wheel(dir int, fast bool) {
 }
 
 func (m model) updateNormal(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
-	switch msg.String() {
-	case "q":
+	k := m.keys
+	switch {
+	case key.Matches(msg, k.Quit):
 		return m, tea.Quit
-	case "esc":
+	case key.Matches(msg, k.Back):
 		if m.sel >= 0 {
 			m.sel = -1
 		} else {
 			m.query, m.matches = "", nil
 		}
 		m.refresh()
-		return m, nil
-	case "/":
+	case key.Matches(msg, k.Search):
 		m.mode, m.prevQ, m.query = modeSearch, m.query, ""
 		m.matches = nil
 		m.refresh()
-		return m, nil
-	case "n", "N":
+	case key.Matches(msg, k.NextMatch, k.PrevMatch):
 		if len(m.matches) == 0 {
 			if m.query != "" {
 				return m, m.setFlash("no matches")
 			}
 			return m, nil
 		}
-		if msg.String() == "n" {
+		if key.Matches(msg, k.NextMatch) {
 			m.cur = (m.cur + 1) % len(m.matches)
 		} else {
 			m.cur = (m.cur - 1 + len(m.matches)) % len(m.matches)
 		}
 		m.refresh()
 		m.show(m.matches[m.cur].line)
-		return m, nil
-	case "o":
+	case key.Matches(msg, k.Outline):
 		if len(m.doc.headings) == 0 {
 			return m, m.setFlash("no headings")
 		}
@@ -423,17 +443,15 @@ func (m model) updateNormal(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				m.oSel = i
 			}
 		}
-		return m, nil
-	case "tab", "shift+tab":
-		return m.stepLink(msg.String() == "tab")
-	case "enter":
+	case key.Matches(msg, k.NextLink, k.PrevLink):
+		return m.stepLink(key.Matches(msg, k.NextLink))
+	case key.Matches(msg, k.OpenLink):
 		if m.sel >= 0 {
 			return m, m.setFlash(openLink(m.doc.links[m.sel].url))
 		}
-		return m, nil
-	case "r":
+	case key.Matches(msg, k.Reload):
 		return m.reload(true)
-	case "s":
+	case key.Matches(msg, k.ToggleSpacing):
 		a := m.anchor()
 		m.spaced = !m.spaced
 		m.layout()
@@ -442,25 +460,30 @@ func (m model) updateNormal(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			return m, m.setFlash("double spacing")
 		}
 		return m, m.setFlash("single spacing")
-	case "?", "h":
+	case key.Matches(msg, k.Help):
 		m.mode = modeHelp
-		return m, nil
-	case "g", "home":
+	case key.Matches(msg, k.Top):
 		m.vp.GotoTop()
-		return m, nil
-	case "G", "end":
+	case key.Matches(msg, k.Bottom):
 		m.vp.GotoBottom()
-		return m, nil
-	case "shift+up", "K":
+	case key.Matches(msg, k.ScrollUp):
+		m.vp.ScrollUp(1)
+	case key.Matches(msg, k.ScrollDown):
+		m.vp.ScrollDown(1)
+	case key.Matches(msg, k.ScrollUp10):
 		m.vp.ScrollUp(fastLines)
-		return m, nil
-	case "shift+down", "J":
+	case key.Matches(msg, k.ScrollDown10):
 		m.vp.ScrollDown(fastLines)
-		return m, nil
+	case key.Matches(msg, k.HalfPageUp):
+		m.vp.HalfPageUp()
+	case key.Matches(msg, k.HalfPageDown):
+		m.vp.HalfPageDown()
+	case key.Matches(msg, k.PageUp):
+		m.vp.PageUp()
+	case key.Matches(msg, k.PageDown):
+		m.vp.PageDown()
 	}
-	var cmd tea.Cmd
-	m.vp, cmd = m.vp.Update(msg)
-	return m, cmd
+	return m, nil
 }
 
 func (m model) stepLink(forward bool) (tea.Model, tea.Cmd) {
@@ -628,17 +651,16 @@ type uiTheme struct {
 	bar, dim, sel, head  lipgloss.Style
 }
 
-func newUITheme(style string) uiTheme {
-	p := paletteFor(style)
+func newUITheme(p palette) uiTheme {
 	esc := func(params ...string) string { return "[" + strings.Join(params, ";") + "m" }
 	return uiTheme{
-		match:   esc(fgSGR(p.pale), bgSGR(p.faint)),
-		current: esc("1", fgSGR(p.onAcc), bgSGR(p.bright)),
-		link:    esc(fgSGR(p.onAcc), bgSGR(p.green)),
-		bar:     lipgloss.NewStyle().Foreground(lipgloss.Color(p.bright)).Background(lipgloss.Color(p.barBg)),
+		match:   esc(fgSGR(p.emphasis), bgSGR(p.faint)),
+		current: esc("1", fgSGR(p.onAccent), bgSGR(p.accentStrong)),
+		link:    esc(fgSGR(p.onAccent), bgSGR(p.accent)),
+		bar:     lipgloss.NewStyle().Foreground(lipgloss.Color(p.accentStrong)).Background(lipgloss.Color(p.statusBg)),
 		dim:     lipgloss.NewStyle().Foreground(lipgloss.Color(p.muted)),
-		sel:     lipgloss.NewStyle().Foreground(lipgloss.Color(p.onAcc)).Background(lipgloss.Color(p.green)),
-		head:    lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color(p.bright)),
+		sel:     lipgloss.NewStyle().Foreground(lipgloss.Color(p.onAccent)).Background(lipgloss.Color(p.accent)),
+		head:    lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color(p.accentStrong)),
 	}
 }
 
@@ -724,52 +746,20 @@ func (m model) outlineView() string {
 	return fill(lines, m.h-1)
 }
 
-// helpGroups lists the keys. Each row is an action and its key choices;
-// each choice is one or more keys drawn as keycaps.
-type helpRow struct {
-	action  string
-	choices [][]string
-}
-
-var helpGroups = []struct {
-	title string
-	rows  []helpRow
-}{
-	{"Scrolling", []helpRow{
-		{"Line up / down", [][]string{{"↑", "↓"}, {"k", "j"}}},
-		{"10 lines up / down", [][]string{{"Shift+↑", "Shift+↓"}, {"K", "J"}}},
-		{"Half page up / down", [][]string{{"Ctrl+u", "Ctrl+d"}}},
-		{"Page up / down", [][]string{{"PgUp", "PgDn"}, {"b", "Space"}}},
-		{"Top / bottom", [][]string{{"g", "G"}, {"Home", "End"}}},
-		{"Scroll", [][]string{{"wheel"}}},
-		{"Scroll fast", [][]string{{"Alt+wheel"}}},
-	}},
-	{"Finding things", []helpRow{
-		{"Search as you type", [][]string{{"/"}}},
-		{"Next / previous match", [][]string{{"n", "N"}}},
-		{"Heading outline", [][]string{{"o"}}},
-		{"Next / previous link", [][]string{{"Tab", "Shift+Tab"}}},
-		{"Open selected link", [][]string{{"Enter"}}},
-	}},
-	{"General", []helpRow{
-		{"Back out one level", [][]string{{"Esc"}}},
-		{"Reload file", [][]string{{"r"}}},
-		{"Double / single spacing", [][]string{{"s"}}},
-		{"This help", [][]string{{"?"}, {"h"}}},
-		{"Quit", [][]string{{"q"}, {"Ctrl+c"}}},
-	}},
-}
-
 func (m model) helpView() string {
-	p := paletteFor(m.style)
+	p := m.pal
 	c := func(hex string) lipgloss.Color { return lipgloss.Color(hex) }
-	title := lipgloss.NewStyle().Bold(true).Foreground(c(p.bright))
-	group := lipgloss.NewStyle().Bold(true).Foreground(c(p.green))
+	title := lipgloss.NewStyle().Bold(true).Foreground(c(p.accentStrong))
+	group := lipgloss.NewStyle().Bold(true).Foreground(c(p.accent))
 	action := lipgloss.NewStyle().Foreground(c(p.text))
 	dim := lipgloss.NewStyle().Foreground(c(p.muted))
-	keycap := lipgloss.NewStyle().Foreground(c(p.pale)).Background(c(p.keyBg)).Padding(0, 1)
+	keycap := lipgloss.NewStyle().Foreground(c(p.emphasis)).Background(c(p.keycapBg)).Padding(0, 1)
+	groups := helpGroups(m.keys)
 
 	keys := func(r helpRow) string {
+		if len(r.choices) == 0 {
+			return dim.Render("unbound")
+		}
 		var parts []string
 		for _, choice := range r.choices {
 			var caps []string
@@ -782,14 +772,14 @@ func (m model) helpView() string {
 	}
 
 	actionW := 0
-	for _, g := range helpGroups {
+	for _, g := range groups {
 		for _, r := range g.rows {
 			actionW = max(actionW, lipgloss.Width(r.action))
 		}
 	}
 	var lines []string
 	lines = append(lines, title.Render("Keys"), "")
-	for gi, g := range helpGroups {
+	for gi, g := range groups {
 		if gi > 0 {
 			lines = append(lines, "")
 		}

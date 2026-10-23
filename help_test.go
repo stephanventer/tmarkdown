@@ -6,7 +6,7 @@ import (
 )
 
 func TestHelpViewFits(t *testing.T) {
-	m := newModel("", "x", []byte("# x"), "dark", false)
+	m := newModel("", "x", []byte("# x"), testView(false))
 	m.w, m.h = 100, 40
 	out := m.helpView()
 	if n := len(strings.Split(out, "\n")); n != 39 {

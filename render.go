@@ -82,11 +82,11 @@ type Doc struct {
 
 // buildDoc renders src wrapped at width, indents every line by pad spaces,
 // and indexes headings and links. With osc8, link text gets OSC 8 hyperlinks.
-func buildDoc(src []byte, width, pad int, style string, osc8 bool) (*Doc, error) {
+func buildDoc(src []byte, width, pad int, p palette, osc8 bool) (*Doc, error) {
 	heads, entries := scanAST(src)
 
 	r, err := glamour.NewTermRenderer(
-		glamour.WithStyles(styleConfig(style)),
+		glamour.WithStyles(styleConfig(p)),
 		glamour.WithWordWrap(width),
 		glamour.WithEmoji(),
 		glamour.WithInlineTableLinks(true),
@@ -134,7 +134,7 @@ func buildDoc(src []byte, width, pad int, style string, osc8 bool) (*Doc, error)
 		}
 	}
 	d.headings = mapHeadings(heads, d.plain)
-	styleHeadings(d, width, pad, style)
+	styleHeadings(d, width, pad, p)
 	if osc8 {
 		addHyperlinks(d)
 	}

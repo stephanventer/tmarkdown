@@ -8,6 +8,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"runtime"
 	"runtime/debug"
 	"strings"
 	"time"
@@ -26,12 +27,15 @@ Usage:
   cat FILE | tmarkdown         read from stdin
 
 Flags:
-  --dark     force the dark theme
-  --light    force the light theme
-  --plain    print the rendered text and exit (also used when output is piped)
-  --double   start with double line spacing (press s in the viewer to toggle)
-  -v         show the version
-  -h         show this help
+  --dark           force the dark theme
+  --light          force the light theme
+  --plain          print the rendered text and exit (also used when output is piped)
+  --double         start with double line spacing (press s in the viewer to toggle)
+  --single         start with single line spacing
+  --config PATH    read settings from PATH instead of the default config file
+  --print-config   print the effective settings as TOML and exit
+  -v               show the version
+  -h               show this help
 
 Press ? inside the viewer for keys.
 `
@@ -59,35 +63,94 @@ func main() {
 	}
 }
 
-func run(args []string) error {
-	style, plain, path, spaced := "", false, "", false
-	for _, a := range args {
-		switch a {
-		case "--dark":
-			style = "dark"
-		case "--light":
-			style = "light"
-		case "--plain":
-			plain = true
-		case "--double":
-			spaced = true
-		case "-v", "--version":
-			fmt.Println("tmarkdown", versionString())
-			return nil
-		case "-h", "--help":
-			fmt.Print(usage)
-			return nil
+// flags holds the command line. Empty strings mean "not given".
+type flags struct {
+	appearance, spacing, config, path string
+	plain, printConfig, help, version bool
+}
+
+func parseFlags(args []string) (flags, error) {
+	var f flags
+	var bad error
+	for i := 0; i < len(args); i++ {
+		a := args[i]
+		switch {
+		case a == "--dark", a == "--light":
+			f.appearance = a[2:]
+		case a == "--double", a == "--single":
+			f.spacing = a[2:]
+		case a == "--plain":
+			f.plain = true
+		case a == "--print-config":
+			f.printConfig = true
+		case a == "--config":
+			if i+1 >= len(args) {
+				return f, errors.New("--config needs a file path")
+			}
+			i++
+			f.config = args[i]
+		case strings.HasPrefix(a, "--config="):
+			f.config = strings.TrimPrefix(a, "--config=")
+		case a == "-v", a == "--version":
+			f.version = true
+		case a == "-h", a == "--help":
+			f.help = true
+		case strings.HasPrefix(a, "--"):
+			if bad == nil {
+				bad = fmt.Errorf("unknown flag %s (try -h)", a)
+			}
 		default:
-			if strings.HasPrefix(a, "--") {
-				return fmt.Errorf("unknown flag %s (try -h)", a)
+			if f.path != "" && bad == nil {
+				bad = errors.New("only one file at a time")
 			}
-			if path != "" {
-				return errors.New("only one file at a time")
-			}
-			path = a
+			f.path = a
 		}
 	}
+	if f.help || f.version {
+		return f, nil
+	}
+	return f, bad
+}
 
+func run(args []string) error {
+	f, err := parseFlags(args)
+	if err != nil {
+		return err
+	}
+	cfgPath, explicit := findConfig(f.config, osConfigEnv(runtime.GOOS))
+	if f.version {
+		fmt.Println("tmarkdown", versionString())
+		return nil
+	}
+	if f.help {
+		fmt.Print(usage)
+		fmt.Print(configHelp(cfgPath, explicit))
+		return nil
+	}
+
+	cfg, err := loadSettings(cfgPath, explicit)
+	if err != nil {
+		return err
+	}
+	if f.appearance != "" {
+		cfg.appearance = f.appearance
+	}
+	if f.spacing != "" {
+		cfg.spacing = f.spacing
+	}
+	th, err := cfg.resolveTheme()
+	if err != nil {
+		return err
+	}
+	if f.printConfig {
+		fmt.Print(cfg.toTOML())
+		return nil
+	}
+	for _, w := range cfg.warnings {
+		fmt.Fprintln(os.Stderr, "tmarkdown: warning:", w)
+	}
+
+	path := f.path
 	stdinPiped := !term.IsTerminal(int(os.Stdin.Fd()))
 	if path == "" && !stdinPiped {
 		fmt.Print(usage)
@@ -95,7 +158,6 @@ func run(args []string) error {
 	}
 
 	var src []byte
-	var err error
 	name := path
 	if path == "" || path == "-" {
 		path, name = "", "stdin"
@@ -117,15 +179,17 @@ func run(args []string) error {
 	}
 
 	isTTY := term.IsTerminal(int(os.Stdout.Fd()))
-	if style == "" {
+	style := cfg.appearance
+	if style == "auto" {
 		style = "dark"
 		if isTTY && !detectDark() {
 			style = "light"
 		}
 	}
+	pal := th.palette(style)
 
-	if plain || !isTTY {
-		d, err := buildDoc(src, 80, 0, style, true)
+	if f.plain || !isTTY {
+		d, err := buildDoc(src, 80, 0, pal, true)
 		if err != nil {
 			return err
 		}
@@ -133,7 +197,20 @@ func run(args []string) error {
 		return nil
 	}
 
-	m := newModel(path, name, src, style, spaced)
+	var flash string
+	if n := len(cfg.warnings); n > 0 {
+		flash = "config: " + cfg.warnings[0]
+		if n > 1 {
+			flash += fmt.Sprintf(" (+%d more, printed on exit)", n-1)
+		}
+	}
+	m := newModel(path, name, src, viewOpts{
+		pal:      pal,
+		keys:     newKeyMap(cfg.keys),
+		spaced:   cfg.spacing == "double",
+		maxWidth: cfg.maxWidth,
+		flash:    flash,
+	})
 	opts := []tea.ProgramOption{tea.WithAltScreen(), tea.WithMouseCellMotion()}
 	if path == "" {
 		opts = append(opts, tea.WithInputTTY()) // stdin holds the document
@@ -147,6 +224,20 @@ func run(args []string) error {
 	}
 	_, err = p.Run()
 	return err
+}
+
+// configHelp is the part of --help that says where the config file is.
+func configHelp(path string, explicit bool) string {
+	switch {
+	case path == "":
+		return "\nConfig: no config location (home directory unknown)\n"
+	case explicit:
+		return "\nConfig: " + path + "\n"
+	}
+	if _, err := os.Stat(path); err == nil {
+		return "\nConfig: " + path + "\n"
+	}
+	return "\nConfig: " + path + " (not found; defaults in use)\n"
 }
 
 func unwrapPathErr(err error) error {

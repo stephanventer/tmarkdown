@@ -15,7 +15,7 @@ func sampleDoc(t *testing.T) *Doc {
 	if err != nil {
 		t.Fatal(err)
 	}
-	d, err := buildDoc(src, 80, 3, "dark", false)
+	d, err := buildDoc(src, 80, 3, matrixDark, false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -125,14 +125,14 @@ func TestRenderSpeed(t *testing.T) {
 		b.WriteString("\n")
 	}
 	start := time.Now()
-	if _, err := buildDoc([]byte(b.String()), 96, 2, "dark", false); err != nil {
+	if _, err := buildDoc([]byte(b.String()), 96, 2, matrixDark, false); err != nil {
 		t.Fatal(err)
 	}
 	t.Logf("1 MB render: %v", time.Since(start))
 }
 
 func TestWheelSteps(t *testing.T) {
-	m := newModel("", "x", nil, "dark", false)
+	m := newModel("", "x", nil, testView(false))
 	m.vp.Height = 10
 	m.vp.SetContent(strings.Repeat("x\n", 500))
 	m.wheel(1, false)
@@ -162,7 +162,7 @@ func TestDoubleSpacing(t *testing.T) {
 	if rows[h.line+1] != rows[h.line]+1 {
 		t.Error("gap added between H2 and its rule")
 	}
-	m := newModel("", "x", nil, "dark", true)
+	m := newModel("", "x", nil, testView(true))
 	m.rows = rows
 	for i := range rows {
 		if m.toLine(m.toRow(i)) != i {
@@ -177,7 +177,7 @@ func TestDoubleSpacing(t *testing.T) {
 func TestHighlightsDrawn(t *testing.T) {
 	src, _ := os.ReadFile("sample.md")
 	for _, spaced := range []bool{false, true} {
-		mm, _ := newModel("", "x", src, "dark", spaced).Update(tea.WindowSizeMsg{Width: 100, Height: 40})
+		mm, _ := newModel("", "x", src, testView(spaced)).Update(tea.WindowSizeMsg{Width: 100, Height: 40})
 		m := mm.(model)
 		m.query = "Second"
 		m.matches = findMatches(m.doc.plain, m.query)
@@ -201,7 +201,7 @@ func TestHighlightsDrawn(t *testing.T) {
 // USERPROFILE); the heading must still map to its own line.
 func TestHeadingNotMatchedInsideParagraph(t *testing.T) {
 	src := []byte("# Title\n\nSet %USERPROFILE% first.\n\n## Use\n\nBody.\n")
-	d, err := buildDoc(src, 80, 3, "dark", false)
+	d, err := buildDoc(src, 80, 3, matrixDark, false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -224,7 +224,7 @@ func TestHeadingNotMatchedInsideParagraph(t *testing.T) {
 // A bare URL longer than the width wraps; the selection must cover every part.
 func TestWrappedAutolinkCoversAllLines(t *testing.T) {
 	u := "https://example.com/api/project_badges/measure?project=Some.Long.Name&metric=coverage&token=abcdef0123456789"
-	d, err := buildDoc([]byte("See "+u+" ok\n"), 40, 0, "dark", false)
+	d, err := buildDoc([]byte("See "+u+" ok\n"), 40, 0, matrixDark, false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -244,7 +244,7 @@ func TestWrappedAutolinkCoversAllLines(t *testing.T) {
 // A link around an image wraps over several lines; all of them are covered.
 func TestWrappedImageLinkCoversAllLines(t *testing.T) {
 	u := "https://example.com/api/project_badges/measure?project=Some.Long.Name&token=abcdef0123456789"
-	d, err := buildDoc([]byte("[![Coverage]("+u+")](https://x.io/a)\n"), 40, 2, "dark", false)
+	d, err := buildDoc([]byte("[![Coverage]("+u+")](https://x.io/a)\n"), 40, 2, matrixDark, false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -262,7 +262,7 @@ func TestWrappedImageLinkCoversAllLines(t *testing.T) {
 // must move down with it.
 func TestWrappedLinkBelowHeadingCoversAllLines(t *testing.T) {
 	u := "https://example.com/api/project_badges/measure?project=Some.Long.Name&token=abcdef0123456789"
-	d, err := buildDoc([]byte("## Quality\n\n[![Coverage]("+u+")](https://x.io/a)\n"), 40, 2, "dark", false)
+	d, err := buildDoc([]byte("## Quality\n\n[![Coverage]("+u+")](https://x.io/a)\n"), 40, 2, matrixDark, false)
 	if err != nil {
 		t.Fatal(err)
 	}

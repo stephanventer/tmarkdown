@@ -21,22 +21,21 @@ type headingLook struct {
 	char string // rule character
 }
 
-func headingLooks(style string) map[int]headingLook {
-	p := paletteFor(style)
+func headingLooks(p palette) map[int]headingLook {
 	esc := func(params ...string) string { return "\x1b[" + strings.Join(params, ";") + "m" }
 	return map[int]headingLook{
-		1: {text: esc("1", fgSGR(p.onAcc), bgSGR(p.bright))},
-		2: {text: esc("1", fgSGR(p.bright)), rule: esc(fgSGR(p.green)), char: "━"},
-		3: {text: esc("1", fgSGR(p.green)), rule: esc(fgSGR(p.faint)), char: "─"},
-		4: {text: esc("1", fgSGR(p.soft))},
+		1: {text: esc("1", fgSGR(p.onAccent), bgSGR(p.accentStrong))},
+		2: {text: esc("1", fgSGR(p.accentStrong)), rule: esc(fgSGR(p.accent)), char: "━"},
+		3: {text: esc("1", fgSGR(p.accent)), rule: esc(fgSGR(p.faint)), char: "─"},
+		4: {text: esc("1", fgSGR(p.accentSoft))},
 	}
 }
 
 // styleHeadings replaces glamour's heading lines with our own and shifts
 // the line numbers of everything below. width is glamour's wrap width,
 // which includes its 2-column margin on each side.
-func styleHeadings(d *Doc, width, pad int, style string) {
-	looks := headingLooks(style)
+func styleHeadings(d *Doc, width, pad int, p palette) {
+	looks := headingLooks(p)
 	indent := strings.Repeat(" ", pad+2)
 	inner := max(width-4, 10)
 
