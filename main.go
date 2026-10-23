@@ -7,9 +7,11 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/signal"
 	"path/filepath"
 	"runtime/debug"
 	"strings"
+	"syscall"
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
@@ -30,6 +32,9 @@ Flags:
   --light    force the light theme
   --plain    print the rendered text and exit (also used when output is piped)
   --double   start with double line spacing (press s in the viewer to toggle)
+  --preview  also open a live rendered preview in the browser (press p in the viewer)
+  --preview-only
+             serve the browser preview without the viewer; Ctrl+C to stop
   -v         show the version
   -h         show this help
 
@@ -61,6 +66,7 @@ func main() {
 
 func run(args []string) error {
 	style, plain, path, spaced := "", false, "", false
+	preview, previewOnly := false, false
 	for _, a := range args {
 		switch a {
 		case "--dark":
@@ -71,6 +77,10 @@ func run(args []string) error {
 			plain = true
 		case "--double":
 			spaced = true
+		case "--preview":
+			preview = true
+		case "--preview-only":
+			previewOnly = true
 		case "-v", "--version":
 			fmt.Println("tmarkdown", versionString())
 			return nil
@@ -116,12 +126,20 @@ func run(args []string) error {
 		return fmt.Errorf("%s looks binary", name)
 	}
 
+	if (preview || previewOnly) && path == "" {
+		return errors.New("--preview needs a file, not stdin")
+	}
+
 	isTTY := term.IsTerminal(int(os.Stdout.Fd()))
 	if style == "" {
 		style = "dark"
 		if isTTY && !detectDark() {
 			style = "light"
 		}
+	}
+
+	if previewOnly {
+		return runPreviewOnly(path, src, style)
 	}
 
 	if plain || !isTTY {
@@ -134,6 +152,14 @@ func run(args []string) error {
 	}
 
 	m := newModel(path, name, src, style, spaced)
+	if preview {
+		pv, err := startPreview(src, path, style)
+		if err != nil {
+			return err
+		}
+		m.preview = pv
+		openURL(pv.url) //nolint:errcheck
+	}
 	opts := []tea.ProgramOption{tea.WithAltScreen(), tea.WithMouseCellMotion()}
 	if path == "" {
 		opts = append(opts, tea.WithInputTTY()) // stdin holds the document
@@ -145,8 +171,39 @@ func run(args []string) error {
 			defer stop()
 		}
 	}
-	_, err = p.Run()
+	final, err := p.Run()
+	if fm, ok := final.(model); ok && fm.preview != nil {
+		fm.preview.Close()
+	} else {
+		m.preview.Close()
+	}
 	return err
+}
+
+// runPreviewOnly serves the browser preview and reloads it when the file
+// changes, until interrupted.
+func runPreviewOnly(path string, src []byte, style string) error {
+	pv, err := startPreview(src, path, style)
+	if err != nil {
+		return err
+	}
+	defer pv.Close()
+	stop, err := watch(path, func() {
+		if b, err := os.ReadFile(path); err == nil {
+			pv.SetSource(bytes.TrimPrefix(b, []byte("\xef\xbb\xbf")))
+		}
+	})
+	if err == nil {
+		defer stop()
+	}
+	fmt.Println("preview at", pv.url, "(Ctrl+C to stop)")
+	if err := openURL(pv.url); err != nil {
+		fmt.Fprintln(os.Stderr, "tmarkdown: open failed:", err)
+	}
+	sig := make(chan os.Signal, 1)
+	signal.Notify(sig, os.Interrupt, syscall.SIGTERM)
+	<-sig
+	return nil
 }
 
 func unwrapPathErr(err error) error {

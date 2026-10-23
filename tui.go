@@ -76,6 +76,8 @@ type model struct {
 	resizeGen int
 	deleted   bool
 	errText   string
+
+	preview *previewServer // nil until opened
 }
 
 func newModel(path, name string, src []byte, style string, spaced bool) model {
@@ -250,6 +252,33 @@ func (m *model) setFlash(s string) tea.Cmd {
 // ---- update ----
 
 func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
+	next, cmd := m.update(msg)
+	if nm, ok := next.(model); ok {
+		nm.syncPreview()
+	}
+	return next, cmd
+}
+
+// syncPreview scrolls the browser preview to the heading at the top of
+// the viewer. The server ignores repeats, so this is cheap per update.
+func (m model) syncPreview() {
+	if m.preview == nil || m.doc == nil {
+		return
+	}
+	i := m.currentHeading()
+	if i < 0 {
+		return
+	}
+	text, n := m.doc.headings[i].text, 0
+	for _, h := range m.doc.headings[:i] {
+		if h.text == text {
+			n++
+		}
+	}
+	m.preview.Scroll(text, n)
+}
+
+func (m model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
 		m.w, m.h = msg.Width, msg.Height
@@ -346,6 +375,9 @@ func (m model) reload(manual bool) (tea.Model, tea.Cmd) {
 	}
 	a := m.anchor()
 	m.src = data
+	if m.preview != nil {
+		m.preview.SetSource(data)
+	}
 	m.sel = -1
 	m.rerender()
 	m.restore(a)
@@ -433,6 +465,8 @@ func (m model) updateNormal(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 	case "r":
 		return m.reload(true)
+	case "p":
+		return m.openPreview()
 	case "s":
 		a := m.anchor()
 		m.spaced = !m.spaced
@@ -591,6 +625,23 @@ func (m model) updateOutline(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 func (m model) outlineRows() int { return max(m.h-4, 1) }
 
+func (m model) openPreview() (tea.Model, tea.Cmd) {
+	if m.path == "" {
+		return m, m.setFlash("preview needs a file, not stdin")
+	}
+	if m.preview == nil {
+		p, err := startPreview(m.src, m.path, m.style)
+		if err != nil {
+			return m, m.setFlash(err.Error())
+		}
+		m.preview = p
+	}
+	if err := openURL(m.preview.url); err != nil {
+		return m, m.setFlash("open failed: " + err.Error() + " · " + m.preview.url)
+	}
+	return m, m.setFlash("preview at " + m.preview.url)
+}
+
 // openLink opens web and mail links in the default app. Other schemes and
 // local paths are not opened: a markdown file shouldn't be able to launch
 // programs.
@@ -604,20 +655,28 @@ func openLink(raw string) string {
 	default:
 		return "not opened (only web/mail links): " + raw
 	}
+	if err := openURL(u.String()); err != nil {
+		return "open failed: " + err.Error()
+	}
+	return "opened in browser"
+}
+
+// openURL opens a URL in the default browser without waiting for it.
+func openURL(u string) error {
 	var cmd *exec.Cmd
 	switch runtime.GOOS {
 	case "windows":
-		cmd = exec.Command("rundll32", "url.dll,FileProtocolHandler", u.String())
+		cmd = exec.Command("rundll32", "url.dll,FileProtocolHandler", u)
 	case "darwin":
-		cmd = exec.Command("open", u.String())
+		cmd = exec.Command("open", u)
 	default:
-		cmd = exec.Command("xdg-open", u.String())
+		cmd = exec.Command("xdg-open", u)
 	}
 	if err := cmd.Start(); err != nil {
-		return "open failed: " + err.Error()
+		return err
 	}
 	go cmd.Wait() //nolint:errcheck
-	return "opened in browser"
+	return nil
 }
 
 // ---- view ----
@@ -754,6 +813,7 @@ var helpGroups = []struct {
 	{"General", []helpRow{
 		{"Back out one level", [][]string{{"Esc"}}},
 		{"Reload file", [][]string{{"r"}}},
+		{"Preview in browser", [][]string{{"p"}}},
 		{"Double / single spacing", [][]string{{"s"}}},
 		{"This help", [][]string{{"?"}, {"h"}}},
 		{"Quit", [][]string{{"q"}, {"Ctrl+c"}}},
